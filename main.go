@@ -9,16 +9,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/erasulov/rag-pipeline/internal/cache"
 	"github.com/erasulov/rag-pipeline/internal/chunker"
 	"github.com/erasulov/rag-pipeline/internal/config"
 	"github.com/erasulov/rag-pipeline/internal/domain"
 	"github.com/erasulov/rag-pipeline/internal/embedding"
+	"github.com/erasulov/rag-pipeline/internal/eval"
 	"github.com/erasulov/rag-pipeline/internal/ingest"
 	"github.com/erasulov/rag-pipeline/internal/llm"
 	"github.com/erasulov/rag-pipeline/internal/query"
+	"github.com/erasulov/rag-pipeline/internal/rerank"
+	"github.com/erasulov/rag-pipeline/internal/search"
 	"github.com/erasulov/rag-pipeline/internal/server"
 	"github.com/erasulov/rag-pipeline/internal/telemetry"
 	"github.com/erasulov/rag-pipeline/internal/vectorstore"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -38,7 +43,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer shutdownMetrics()
-	_ = metrics // Will be wired into services when we add instrumentation.
+	_ = metrics
 
 	shutdownTracing, err := telemetry.InitTracing(ctx, cfg.OTelEndpoint)
 	if err != nil {
@@ -56,15 +61,65 @@ func main() {
 	// LLM.
 	ollamaLLM := llm.NewOllamaLLM(cfg.OllamaURL, cfg.ChatModel)
 
-	// Chunker.
-	ch := chunker.NewRecursive(cfg.ChunkSize, cfg.ChunkOverlap)
+	// Chunker (optionally contextual).
+	var ch domain.Chunker
+	ch = chunker.NewRecursive(cfg.ChunkSize, cfg.ChunkOverlap)
+	if cfg.ContextualChunking {
+		ch = chunker.NewContextual(ch, ollamaLLM)
+		slog.Info("contextual chunking enabled")
+	}
 
-	// Services.
-	ingestSvc := ingest.New(ch, embedder, store)
-	querySvc := query.New(embedder, store, ollamaLLM, cfg.DefaultK)
+	// BM25 keyword index (shared between ingest and search).
+	bm25Idx := search.NewBM25Index()
+
+	// Ingest service.
+	ingestSvc := ingest.New(ch, embedder, store, bm25Idx)
+
+	// Build retriever chain.
+	var retriever domain.Retriever
+	retriever = search.NewHybridRetriever(store, embedder, bm25Idx)
+	if cfg.CorrectiveRAG {
+		retriever = search.NewCorrectiveRetriever(retriever, ollamaLLM)
+		slog.Info("corrective RAG enabled")
+	}
+
+	// Optional reranker.
+	var reranker query.Reranker
+	if cfg.Reranking {
+		reranker = rerank.NewLLMReranker(ollamaLLM)
+		slog.Info("LLM reranking enabled")
+	}
+
+	// Optional cache.
+	var queryCache query.Cache
+	if cfg.RedisURL != "" {
+		rdb := buildRedisClient(cfg.RedisURL)
+		if rdb != nil {
+			queryCache = cache.New(rdb, cfg.CacheTTL)
+			defer rdb.Close()
+		}
+	}
+
+	// Query service.
+	querySvc := query.New(retriever, ollamaLLM, reranker, queryCache, cfg.DefaultK)
+
+	// Evaluator.
+	queryFn := func(ctx context.Context, question string, k int) (string, []string, []string, error) {
+		resp, err := querySvc.Query(ctx, query.QueryRequest{Question: question, K: k})
+		if err != nil {
+			return "", nil, nil, err
+		}
+		var docIDs, sources []string
+		for _, s := range resp.Sources {
+			docIDs = append(docIDs, s.DocumentID)
+			sources = append(sources, s.Content)
+		}
+		return resp.Answer, docIDs, sources, nil
+	}
+	evaluator := eval.NewEvaluator(queryFn, ollamaLLM)
 
 	// HTTP server.
-	srv := server.New(ingestSvc, querySvc)
+	srv := server.New(ingestSvc, querySvc, server.WithEvaluator(evaluator))
 	httpSrv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      srv.Router(),
@@ -79,6 +134,10 @@ func main() {
 			"vector_store", cfg.VectorStoreType,
 			"embedding_model", cfg.EmbeddingModel,
 			"chat_model", cfg.ChatModel,
+			"contextual_chunking", cfg.ContextualChunking,
+			"corrective_rag", cfg.CorrectiveRAG,
+			"reranking", cfg.Reranking,
+			"cache", cfg.RedisURL != "",
 		)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
@@ -119,4 +178,22 @@ func buildVectorStore(cfg *config.Config) domain.VectorStore {
 		slog.Info("vector store: in-memory")
 		return vectorstore.NewMemoryStore()
 	}
+}
+
+func buildRedisClient(redisURL string) *redis.Client {
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		slog.Error("redis url parse failed", "error", err)
+		return nil
+	}
+	client := redis.NewClient(opts)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		slog.Error("redis ping failed", "error", err)
+		client.Close()
+		return nil
+	}
+	slog.Info("redis connected", "url", redisURL)
+	return client
 }

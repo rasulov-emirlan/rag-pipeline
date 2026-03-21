@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -31,24 +32,37 @@ type Source struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
-// Service orchestrates the RAG query pipeline:
-// embed query → search → build prompt → LLM → answer.
-type Service struct {
-	embedder domain.Embedder
-	store    domain.VectorStore
-	llm      domain.LLM
-	defaultK int
+// Reranker re-scores search results for better precision.
+type Reranker interface {
+	Rerank(ctx context.Context, query string, results []domain.SearchResult, topN int) ([]domain.SearchResult, error)
 }
 
-func New(embedder domain.Embedder, store domain.VectorStore, llm domain.LLM, defaultK int) *Service {
+// Cache provides optional response caching using raw JSON.
+type Cache interface {
+	Get(ctx context.Context, key string) (json.RawMessage, bool)
+	Set(ctx context.Context, key string, data json.RawMessage)
+}
+
+// Service orchestrates the RAG query pipeline:
+// cache check → retrieve → rerank → build prompt → LLM → answer.
+type Service struct {
+	retriever domain.Retriever
+	llm       domain.LLM
+	reranker  Reranker // optional, nil = skip
+	cache     Cache    // optional, nil = skip
+	defaultK  int
+}
+
+func New(retriever domain.Retriever, llm domain.LLM, reranker Reranker, cache Cache, defaultK int) *Service {
 	if defaultK <= 0 {
 		defaultK = 5
 	}
 	return &Service{
-		embedder: embedder,
-		store:    store,
-		llm:      llm,
-		defaultK: defaultK,
+		retriever: retriever,
+		llm:       llm,
+		reranker:  reranker,
+		cache:     cache,
+		defaultK:  defaultK,
 	}
 }
 
@@ -65,22 +79,57 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (*QueryResponse, 
 		k = s.defaultK
 	}
 
-	// 1. Retrieve relevant chunks.
-	results, err := s.Retrieve(ctx, req.Question, k)
+	// 1. Cache check.
+	cacheKey := normalizeCacheKey(req.Question, k)
+	if s.cache != nil {
+		if data, ok := s.cache.Get(ctx, cacheKey); ok {
+			var cached QueryResponse
+			if err := json.Unmarshal(data, &cached); err == nil {
+				slog.Info("cache hit", "question_len", len(req.Question))
+				return &cached, nil
+			}
+		}
+	}
+
+	// 2. Retrieve relevant chunks.
+	// Fetch more candidates if reranking is enabled.
+	retrieveK := k
+	if s.reranker != nil {
+		retrieveK = k * 3
+		if retrieveK < 15 {
+			retrieveK = 15
+		}
+	}
+
+	results, err := s.retriever.Retrieve(ctx, req.Question, retrieveK)
 	if err != nil {
 		return nil, fmt.Errorf("retrieval: %w", err)
 	}
 
-	// 2. Build RAG prompt.
+	// 3. Rerank if configured.
+	if s.reranker != nil && len(results) > 0 {
+		results, err = s.reranker.Rerank(ctx, req.Question, results, k)
+		if err != nil {
+			slog.Warn("reranking failed, using original order", "error", err)
+			// Fall back to original results, trimmed to k.
+			if k < len(results) {
+				results = results[:k]
+			}
+		}
+	} else if k < len(results) {
+		results = results[:k]
+	}
+
+	// 4. Build RAG prompt.
 	prompt := buildPrompt(req.Question, results)
 
-	// 3. Generate answer.
+	// 5. Generate answer.
 	answer, err := s.generate(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("generation: %w", err)
 	}
 
-	// 4. Build response.
+	// 6. Build response.
 	sources := make([]Source, len(results))
 	for i, r := range results {
 		sources[i] = Source{
@@ -92,37 +141,31 @@ func (s *Service) Query(ctx context.Context, req QueryRequest) (*QueryResponse, 
 	}
 
 	duration := time.Since(start)
+	resp := &QueryResponse{
+		Answer:   answer,
+		Sources:  sources,
+		Duration: duration.Milliseconds(),
+	}
+
+	// 7. Cache store.
+	if s.cache != nil {
+		if data, err := json.Marshal(resp); err == nil {
+			s.cache.Set(ctx, cacheKey, data)
+		}
+	}
+
 	slog.Info("query completed",
 		"question_len", len(req.Question),
 		"chunks_retrieved", len(results),
 		"duration_ms", duration.Milliseconds(),
 	)
 
-	return &QueryResponse{
-		Answer:   answer,
-		Sources:  sources,
-		Duration: duration.Milliseconds(),
-	}, nil
+	return resp, nil
 }
 
 // Retrieve returns relevant chunks without generating an answer.
-// Useful for debugging retrieval quality.
 func (s *Service) Retrieve(ctx context.Context, question string, k int) ([]domain.SearchResult, error) {
-	if s.embedder == nil {
-		return nil, fmt.Errorf("no embedder configured")
-	}
-
-	embeddings, err := s.embedder.Embed(ctx, []string{question})
-	if err != nil {
-		return nil, fmt.Errorf("embedding question: %w", err)
-	}
-
-	results, err := s.store.Search(ctx, embeddings[0], k)
-	if err != nil {
-		return nil, fmt.Errorf("searching: %w", err)
-	}
-
-	return results, nil
+	return s.retriever.Retrieve(ctx, question, k)
 }
 
 // generate calls the LLM or returns a fallback if none is configured.
@@ -150,4 +193,8 @@ func buildPrompt(question string, results []domain.SearchResult) string {
 	b.WriteString(question)
 	b.WriteString("\n\nAnswer:")
 	return b.String()
+}
+
+func normalizeCacheKey(question string, k int) string {
+	return fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSpace(question)), k)
 }

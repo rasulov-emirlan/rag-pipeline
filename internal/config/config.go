@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -31,6 +32,13 @@ type Config struct {
 	// Query defaults
 	DefaultK int
 
+	// Advanced features
+	ContextualChunking bool
+	CorrectiveRAG      bool
+	Reranking          bool
+	RedisURL           string
+	CacheTTL           time.Duration
+
 	// Telemetry
 	OTelEndpoint string
 }
@@ -49,8 +57,13 @@ func Load() *Config {
 		ChromemDir:      getEnv("CHROMEM_DIR", "./data/chromem"),
 		ChunkSize:       getEnvInt("CHUNK_SIZE", 1000),
 		ChunkOverlap:    getEnvInt("CHUNK_OVERLAP", 200),
-		DefaultK:        getEnvInt("DEFAULT_K", 5),
-		OTelEndpoint:    getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		DefaultK:           getEnvInt("DEFAULT_K", 5),
+		ContextualChunking: getEnvBool("CONTEXTUAL_CHUNKING", false),
+		CorrectiveRAG:      getEnvBool("CORRECTIVE_RAG", false),
+		Reranking:          getEnvBool("RERANKING", false),
+		RedisURL:           getEnv("REDIS_URL", ""),
+		CacheTTL:           getEnvDuration("CACHE_TTL", 10*time.Minute),
+		OTelEndpoint:       getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 	}
 }
 
@@ -65,6 +78,22 @@ func getEnvInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
+		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		return strings.ToLower(v) == "true" || v == "1"
+	}
+	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
 		}
 	}
 	return fallback

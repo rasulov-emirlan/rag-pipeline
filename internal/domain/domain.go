@@ -44,6 +44,13 @@ type VectorStore interface {
 	Delete(ctx context.Context, documentID string) error
 }
 
+// Retriever finds relevant chunks for a query. Unlike VectorStore.Search,
+// it may combine multiple search strategies (vector + keyword), reranking,
+// and self-correction.
+type Retriever interface {
+	Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error)
+}
+
 // Chunker splits text into smaller pieces for embedding.
 type Chunker interface {
 	Split(text string) ([]string, error)

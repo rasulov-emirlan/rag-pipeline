@@ -2,23 +2,36 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/erasulov/rag-pipeline/internal/chunker"
+	"github.com/erasulov/rag-pipeline/internal/domain"
 	"github.com/erasulov/rag-pipeline/internal/ingest"
 	"github.com/erasulov/rag-pipeline/internal/query"
 	"github.com/erasulov/rag-pipeline/internal/vectorstore"
 )
 
+// mockRetriever wraps store + embedder for server tests (no real embedder needed).
+type mockRetriever struct {
+	store *vectorstore.MemoryStore
+}
+
+func (r *mockRetriever) Retrieve(_ context.Context, q string, k int) ([]domain.SearchResult, error) {
+	// Return empty results — server tests focus on HTTP, not retrieval quality.
+	return nil, nil
+}
+
 func setupTestServer(t *testing.T) *Server {
 	t.Helper()
 	store := vectorstore.NewMemoryStore()
 	ch := chunker.NewRecursive(1000, 0)
-	ingestSvc := ingest.New(ch, nil, store)
-	querySvc := query.New(nil, store, nil, 5)
+	ingestSvc := ingest.New(ch, nil, store, nil)
+	retriever := &mockRetriever{store: store}
+	querySvc := query.New(retriever, nil, nil, nil, 5)
 	return New(ingestSvc, querySvc)
 }
 
@@ -70,14 +83,12 @@ func TestServer_IngestDocument_EmptyContent(t *testing.T) {
 func TestServer_ListDocuments(t *testing.T) {
 	srv := setupTestServer(t)
 
-	// Ingest a document first.
 	body := `{"id":"doc1","content":"Hello world"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/documents", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	// List documents.
 	req = httptest.NewRequest(http.MethodGet, "/v1/documents", nil)
 	w = httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
@@ -97,14 +108,12 @@ func TestServer_ListDocuments(t *testing.T) {
 func TestServer_DeleteDocument(t *testing.T) {
 	srv := setupTestServer(t)
 
-	// Ingest.
 	body := `{"id":"doc1","content":"Hello world"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/documents", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	// Delete.
 	req = httptest.NewRequest(http.MethodDelete, "/v1/documents/doc1", nil)
 	w = httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
@@ -113,7 +122,6 @@ func TestServer_DeleteDocument(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify deleted.
 	req = httptest.NewRequest(http.MethodGet, "/v1/documents", nil)
 	w = httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)

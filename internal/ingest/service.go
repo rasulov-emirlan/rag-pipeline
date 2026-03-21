@@ -27,22 +27,31 @@ type IngestResult struct {
 	Duration   time.Duration `json:"duration_ms"`
 }
 
+// BM25Indexer is satisfied by search.BM25Index. Defined here to avoid
+// a circular import between ingest and search.
+type BM25Indexer interface {
+	Add(chunkID, documentID, text string)
+	Remove(documentID string)
+}
+
 // Service orchestrates the document ingestion pipeline:
 // chunk → embed → store.
 type Service struct {
 	chunker  domain.Chunker
 	embedder domain.Embedder
 	store    domain.VectorStore
+	bm25     BM25Indexer // optional, nil = no keyword index
 
 	mu   sync.RWMutex
 	docs map[string]DocumentInfo
 }
 
-func New(chunker domain.Chunker, embedder domain.Embedder, store domain.VectorStore) *Service {
+func New(chunker domain.Chunker, embedder domain.Embedder, store domain.VectorStore, bm25 BM25Indexer) *Service {
 	return &Service{
 		chunker:  chunker,
 		embedder: embedder,
 		store:    store,
+		bm25:     bm25,
 		docs:     make(map[string]DocumentInfo),
 	}
 }
@@ -87,7 +96,14 @@ func (s *Service) IngestDocument(ctx context.Context, doc domain.Document) (*Ing
 		return nil, fmt.Errorf("storing: %w", err)
 	}
 
-	// 5. Track document metadata.
+	// 5. Feed BM25 keyword index.
+	if s.bm25 != nil {
+		for _, c := range chunks {
+			s.bm25.Add(c.ID, c.DocumentID, c.Content)
+		}
+	}
+
+	// 6. Track document metadata.
 	s.mu.Lock()
 	s.docs[doc.ID] = DocumentInfo{
 		ID:         doc.ID,
@@ -115,6 +131,10 @@ func (s *Service) IngestDocument(ctx context.Context, doc domain.Document) (*Ing
 func (s *Service) DeleteDocument(ctx context.Context, documentID string) error {
 	if err := s.store.Delete(ctx, documentID); err != nil {
 		return fmt.Errorf("deleting chunks: %w", err)
+	}
+
+	if s.bm25 != nil {
+		s.bm25.Remove(documentID)
 	}
 
 	s.mu.Lock()

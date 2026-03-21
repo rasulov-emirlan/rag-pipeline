@@ -16,7 +16,6 @@ type mockEmbedder struct {
 func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	result := make([][]float32, len(texts))
 	for i := range texts {
-		// Simple deterministic embedding: hash-like based on text length.
 		vec := make([]float32, m.dim)
 		for j := range vec {
 			vec[j] = float32(len(texts[i])+i+j) / 100.0
@@ -32,7 +31,7 @@ func TestService_IngestDocument(t *testing.T) {
 	store := vectorstore.NewMemoryStore()
 	ch := chunker.NewRecursive(50, 0)
 	embedder := &mockEmbedder{dim: 3}
-	svc := New(ch, embedder, store)
+	svc := New(ch, embedder, store, nil)
 
 	doc := domain.Document{
 		ID:      "test-doc",
@@ -54,7 +53,6 @@ func TestService_IngestDocument(t *testing.T) {
 		t.Fatalf("expected multiple chunks, got %d", result.ChunkCount)
 	}
 
-	// Verify chunks are searchable.
 	results, err := store.Search(context.Background(), []float32{0.5, 0.5, 0.5}, 10)
 	if err != nil {
 		t.Fatalf("search: %v", err)
@@ -67,7 +65,7 @@ func TestService_IngestDocument(t *testing.T) {
 func TestService_IngestDocument_AutoGeneratesID(t *testing.T) {
 	store := vectorstore.NewMemoryStore()
 	ch := chunker.NewRecursive(1000, 0)
-	svc := New(ch, nil, store)
+	svc := New(ch, nil, store, nil)
 
 	result, err := svc.IngestDocument(context.Background(), domain.Document{
 		Content: "Some content",
@@ -84,7 +82,7 @@ func TestService_DeleteDocument(t *testing.T) {
 	store := vectorstore.NewMemoryStore()
 	ch := chunker.NewRecursive(1000, 0)
 	embedder := &mockEmbedder{dim: 3}
-	svc := New(ch, embedder, store)
+	svc := New(ch, embedder, store, nil)
 
 	svc.IngestDocument(context.Background(), domain.Document{
 		ID: "doc1", Content: "Document one content",
@@ -109,7 +107,7 @@ func TestService_DeleteDocument(t *testing.T) {
 func TestService_ListDocuments(t *testing.T) {
 	store := vectorstore.NewMemoryStore()
 	ch := chunker.NewRecursive(1000, 0)
-	svc := New(ch, nil, store)
+	svc := New(ch, nil, store, nil)
 
 	svc.IngestDocument(context.Background(), domain.Document{ID: "a", Content: "aaa"})
 	svc.IngestDocument(context.Background(), domain.Document{ID: "b", Content: "bbb"})

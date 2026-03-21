@@ -10,7 +10,7 @@ import (
 
 type mockEmbedder struct {
 	dim       int
-	embedding []float32 // fixed embedding returned for all texts
+	embedding []float32
 }
 
 func (m *mockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
@@ -32,34 +32,47 @@ func (m *mockLLM) Generate(_ context.Context, prompt string) (string, error) {
 	return m.response, nil
 }
 
-func setupQueryTest(t *testing.T) (*Service, *vectorstore.MemoryStore) {
+// mockRetriever wraps a store + embedder as a simple retriever for tests.
+type mockRetriever struct {
+	store    *vectorstore.MemoryStore
+	embedder *mockEmbedder
+}
+
+func (r *mockRetriever) Retrieve(ctx context.Context, query string, k int) ([]domain.SearchResult, error) {
+	embs, err := r.embedder.Embed(ctx, []string{query})
+	if err != nil {
+		return nil, err
+	}
+	return r.store.Search(ctx, embs[0], k)
+}
+
+func setupQueryTest(t *testing.T) *Service {
 	t.Helper()
 
 	store := vectorstore.NewMemoryStore()
 	ctx := context.Background()
 
-	// Pre-load the store with chunks.
 	chunks := []domain.Chunk{
 		{ID: "doc1-0", DocumentID: "doc1", Content: "Paris is the capital of France."},
 		{ID: "doc1-1", DocumentID: "doc1", Content: "France is a country in Europe."},
 		{ID: "doc2-0", DocumentID: "doc2", Content: "Go is a programming language."},
 	}
 	embeddings := [][]float32{
-		{1, 0, 0},   // "Paris" topic
-		{0.8, 0.2, 0}, // "France" topic
-		{0, 0, 1},   // "Go" topic
+		{1, 0, 0},
+		{0.8, 0.2, 0},
+		{0, 0, 1},
 	}
 	store.Store(ctx, chunks, embeddings)
 
-	embedder := &mockEmbedder{dim: 3, embedding: []float32{0.9, 0.1, 0}} // query about France
+	embedder := &mockEmbedder{dim: 3, embedding: []float32{0.9, 0.1, 0}}
+	retriever := &mockRetriever{store: store, embedder: embedder}
 	llm := &mockLLM{response: "The capital of France is Paris."}
 
-	svc := New(embedder, store, llm, 3)
-	return svc, store
+	return New(retriever, llm, nil, nil, 5)
 }
 
 func TestService_Query(t *testing.T) {
-	svc, _ := setupQueryTest(t)
+	svc := setupQueryTest(t)
 
 	resp, err := svc.Query(context.Background(), QueryRequest{
 		Question: "What is the capital of France?",
@@ -75,14 +88,13 @@ func TestService_Query(t *testing.T) {
 	if len(resp.Sources) != 2 {
 		t.Fatalf("expected 2 sources, got %d", len(resp.Sources))
 	}
-	// Top source should be the Paris chunk (closest to query embedding).
 	if resp.Sources[0].DocumentID != "doc1" {
 		t.Fatalf("expected doc1 as top source, got %s", resp.Sources[0].DocumentID)
 	}
 }
 
 func TestService_Query_EmptyQuestion(t *testing.T) {
-	svc, _ := setupQueryTest(t)
+	svc := setupQueryTest(t)
 	_, err := svc.Query(context.Background(), QueryRequest{})
 	if err == nil {
 		t.Fatal("expected error for empty question")
@@ -90,7 +102,7 @@ func TestService_Query_EmptyQuestion(t *testing.T) {
 }
 
 func TestService_Retrieve(t *testing.T) {
-	svc, _ := setupQueryTest(t)
+	svc := setupQueryTest(t)
 
 	results, err := svc.Retrieve(context.Background(), "Tell me about France", 2)
 	if err != nil {
@@ -99,7 +111,6 @@ func TestService_Retrieve(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
-	// First result should be the Paris chunk.
 	if results[0].Chunk.ID != "doc1-0" {
 		t.Fatalf("expected doc1-0, got %s", results[0].Chunk.ID)
 	}
@@ -113,7 +124,8 @@ func TestService_Query_NoLLM(t *testing.T) {
 	)
 
 	embedder := &mockEmbedder{dim: 2, embedding: []float32{1, 0}}
-	svc := New(embedder, store, nil, 5) // No LLM
+	retriever := &mockRetriever{store: store, embedder: embedder}
+	svc := New(retriever, nil, nil, nil, 5)
 
 	resp, err := svc.Query(context.Background(), QueryRequest{Question: "test?"})
 	if err != nil {
@@ -133,21 +145,17 @@ func TestBuildPrompt(t *testing.T) {
 	if len(prompt) == 0 {
 		t.Fatal("prompt should not be empty")
 	}
-	if !contains(prompt, "Paris is the capital.") {
+	if !containsStr(prompt, "Paris is the capital.") {
 		t.Fatal("prompt should contain context")
 	}
-	if !contains(prompt, "What is the capital?") {
+	if !containsStr(prompt, "What is the capital?") {
 		t.Fatal("prompt should contain question")
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
 			return true
 		}
 	}

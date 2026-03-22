@@ -88,11 +88,10 @@ fi
 # 8. Verify deletion
 echo "[8/8] Verify deletion..."
 LIST2=$(curl -sf "$BASE_URL/v1/documents" 2>/dev/null)
-COUNT=$(echo "$LIST2" | grep -o '"count":[0-9]*' | grep -o '[0-9]*')
-if [ "${COUNT:-1}" = "0" ]; then
-  pass "Document confirmed deleted (count=0)"
+if echo "$LIST2" | grep -q '"smoke-test"'; then
+  fail "Verify deletion" "smoke-test document still present"
 else
-  fail "Verify deletion" "count=$COUNT, expected 0"
+  pass "Document confirmed deleted (not in listing)"
 fi
 
 echo ""

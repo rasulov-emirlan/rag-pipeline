@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+  namespace: rag-pipeline
+spec:
+  serviceName: ollama
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+              name: http
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          livenessProbe:
+            exec:
+              command: ["ollama", "list"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["ollama", "list"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+  volumeClaimTemplates:
+    - metadata:
+        name: ollama-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -17,15 +18,17 @@ import (
 // Server is the HTTP transport layer. It decodes requests, calls services,
 // and encodes responses. No business logic lives here.
 type Server struct {
-	ingest    *ingest.Service
-	query     *query.Service
-	evaluator *eval.Evaluator // optional, nil = endpoint disabled
+	ingest       *ingest.Service
+	query        *query.Service
+	evaluator    *eval.Evaluator        // optional, nil = endpoint disabled
+	healthChecks map[string]domain.HealthChecker
 }
 
 func New(ingest *ingest.Service, query *query.Service, opts ...Option) *Server {
 	s := &Server{
-		ingest: ingest,
-		query:  query,
+		ingest:       ingest,
+		query:        query,
+		healthChecks: make(map[string]domain.HealthChecker),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -41,9 +44,16 @@ func WithEvaluator(e *eval.Evaluator) Option {
 	return func(s *Server) { s.evaluator = e }
 }
 
+// WithHealthCheck registers a named dependency for health probes.
+func WithHealthCheck(name string, checker domain.HealthChecker) Option {
+	return func(s *Server) { s.healthChecks[name] = checker }
+}
+
 func (s *Server) Router() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("POST /v1/documents", s.handleIngestDocument)
 	mux.HandleFunc("GET /v1/documents", s.handleListDocuments)
 	mux.HandleFunc("DELETE /v1/documents/{id}", s.handleDeleteDocument)
@@ -54,8 +64,60 @@ func (s *Server) Router() http.Handler {
 	return withLogging(mux)
 }
 
+// handleHealth returns full dependency health status (for dashboards/humans).
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	checks := make(map[string]map[string]any)
+	overall := "ok"
+
+	for name, checker := range s.healthChecks {
+		start := time.Now()
+		err := checker.HealthCheck(ctx)
+		latency := time.Since(start).Milliseconds()
+
+		if err != nil {
+			checks[name] = map[string]any{"status": "error", "error": err.Error(), "latency_ms": latency}
+			overall = "degraded"
+		} else {
+			checks[name] = map[string]any{"status": "ok", "latency_ms": latency}
+		}
+	}
+
+	status := http.StatusOK
+	if overall == "degraded" {
+		status = http.StatusServiceUnavailable
+	}
+
+	writeJSON(w, status, map[string]any{
+		"status": overall,
+		"checks": checks,
+	})
+}
+
+// handleHealthz is a lightweight liveness probe — always 200 if process is up.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleReadyz is a readiness probe — checks all dependencies.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	for name, checker := range s.healthChecks {
+		if err := checker.HealthCheck(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not ready",
+				"failed": name,
+				"error":  err.Error(),
+			})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 // IngestRequest is the JSON body for document ingestion.

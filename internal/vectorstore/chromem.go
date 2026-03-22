@@ -104,6 +104,11 @@ func (s *ChromemStore) Search(ctx context.Context, embedding []float32, k int) (
 	return out, nil
 }
 
+// HealthCheck always returns nil — chromem-go is in-process.
+func (s *ChromemStore) HealthCheck(_ context.Context) error {
+	return nil
+}
+
 func (s *ChromemStore) Delete(ctx context.Context, documentID string) error {
 	// Use chromem-go's where filter to match by document_id metadata.
 	return s.collection.Delete(ctx,

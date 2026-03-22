@@ -26,6 +26,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Stateful components (per-instance, lost on restart):
+//   - BM25 keyword index: rebuilt as documents are ingested, empty on start
+//   - Document registry: in-memory map for listing, empty on start
+//
+// Persistent state (survives restarts):
+//   - Vector store embeddings (Weaviate/chromem with persistence)
+//   - Redis cache (if configured)
+//
+// For multi-replica deployments: use Weaviate (shared state), accept that
+// BM25 index and document registry rebuild per pod as documents are ingested.
+// The document registry is informational (listing endpoint), not critical path.
 func main() {
 	cfg := config.Load()
 
@@ -118,8 +129,15 @@ func main() {
 	}
 	evaluator := eval.NewEvaluator(queryFn, ollamaLLM)
 
-	// HTTP server.
-	srv := server.New(ingestSvc, querySvc, server.WithEvaluator(evaluator))
+	// HTTP server with health checks.
+	serverOpts := []server.Option{
+		server.WithEvaluator(evaluator),
+		server.WithHealthCheck("ollama", embedder),
+	}
+	if hc, ok := store.(domain.HealthChecker); ok {
+		serverOpts = append(serverOpts, server.WithHealthCheck("vector_store", hc))
+	}
+	srv := server.New(ingestSvc, querySvc, serverOpts...)
 	httpSrv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      srv.Router(),

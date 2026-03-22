@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-pipeline
+  namespace: rag-pipeline
+  labels:
+    app: rag-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-pipeline
+  template:
+    metadata:
+      labels:
+        app: rag-pipeline
+    spec:
+      containers:
+        - name: rag-pipeline
+          image: rag-pipeline:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: rag-pipeline-config
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          # Liveness: is the process alive?
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # Readiness: are dependencies healthy?
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          # Startup: allow time for initial connection setup.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30

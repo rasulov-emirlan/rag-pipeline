@@ -5,10 +5,17 @@ services:
       - "8080:8080"
     env_file: .env
     depends_on:
-      ollama:
-        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      weaviate:
+        condition: service_healthy
       otel-collector:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     restart: unless-stopped
 
   ollama:
@@ -17,7 +24,31 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
+
+  # Init container: pulls required models before the app starts.
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling embedding model..."
+        ollama pull nomic-embed-text
+        echo "Pulling chat model..."
+        ollama pull llama3.2
+        echo "Models ready."
 
   weaviate:
     image: cr.weaviate.io/semitechnologies/weaviate:1.28.2
@@ -32,9 +63,15 @@ services:
       CLUSTER_HOSTNAME: "node1"
     volumes:
       - weaviate_data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/v1/.well-known/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     restart: unless-stopped
 
-  # --- Observability Stack (same as Project 1) ---
+  # --- Observability Stack ---
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest

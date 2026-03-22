@@ -89,6 +89,11 @@ func (s *MemoryStore) Delete(_ context.Context, documentID string) error {
 	return nil
 }
 
+// HealthCheck always returns nil — in-memory store is always healthy.
+func (s *MemoryStore) HealthCheck(_ context.Context) error {
+	return nil
+}
+
 func cosineSimilarity(a, b []float32) float64 {
 	if len(a) != len(b) {
 		return 0

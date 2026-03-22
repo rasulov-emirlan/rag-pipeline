@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: rag-pipeline
+
+resources:
+  - namespace.yaml
+  # App
+  - app/configmap.yaml
+  - app/deployment.yaml
+  - app/service.yaml
+  # Ollama
+  - ollama/statefulset.yaml
+  - ollama/service.yaml
+  - ollama/init-job.yaml
+  # Weaviate
+  - weaviate/statefulset.yaml
+  - weaviate/service.yaml

@@ -56,6 +56,11 @@ type Chunker interface {
 	Split(text string) ([]string, error)
 }
 
+// HealthChecker is implemented by components that can report their health.
+type HealthChecker interface {
+	HealthCheck(ctx context.Context) error
+}
+
 // Loader reads a source and returns its text content.
 type Loader interface {
 	Load(ctx context.Context) (string, error)

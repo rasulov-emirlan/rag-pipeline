@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-pipeline-config
+  namespace: rag-pipeline
+data:
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  OLLAMA_URL: "http://ollama:11434"
+  EMBEDDING_MODEL: "nomic-embed-text"
+  EMBEDDING_DIM: "768"
+  CHAT_MODEL: "llama3.2"
+  VECTOR_STORE: "weaviate"
+  WEAVIATE_HOST: "weaviate:8080"
+  WEAVIATE_SCHEME: "http"
+  CHUNK_SIZE: "1000"
+  CHUNK_OVERLAP: "200"
+  DEFAULT_K: "5"
+  CONTEXTUAL_CHUNKING: "false"
+  CORRECTIVE_RAG: "false"
+  RERANKING: "false"

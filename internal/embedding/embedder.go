@@ -77,3 +77,20 @@ func (e *OllamaEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 func (e *OllamaEmbedder) Dimension() int {
 	return e.dimension
 }
+
+// HealthCheck verifies Ollama is reachable.
+func (e *OllamaEmbedder) HealthCheck(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.baseURL+"/api/tags", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama unreachable: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama unhealthy: status %d", resp.StatusCode)
+	}
+	return nil
+}

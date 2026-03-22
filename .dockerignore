@@ -1,0 +1,9 @@
+.git
+.env
+bin/
+data/
+k8s/
+scripts/
+*.md
+.dockerignore
+.claude/

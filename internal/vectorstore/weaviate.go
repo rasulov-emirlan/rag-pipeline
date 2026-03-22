@@ -219,6 +219,21 @@ func (s *WeaviateStore) Delete(ctx context.Context, documentID string) error {
 	return nil
 }
 
+// HealthCheck verifies Weaviate is reachable.
+func (s *WeaviateStore) HealthCheck(ctx context.Context) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		s.baseURL+"/v1/.well-known/ready", nil)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("weaviate unreachable: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("weaviate unhealthy: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // GraphQL response types.
 type graphqlResponse struct {
 	Data struct {
